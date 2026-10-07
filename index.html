@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Car Control + GPS</title>
+<style>
+:root{--bg:#eef1f4;--panel:#fff;--ink:#16202a;--mute:#5d6b78;--line:#d3dae1;--go:#0a7d5a;--warn:#c2410c;--accent:#1d4ed8}
+@media (prefers-color-scheme:dark){:root{--bg:#10161c;--panel:#18212a;--ink:#e8eef4;--mute:#93a1ae;--line:#2b3742;--go:#34d399;--warn:#fb923c;--accent:#60a5fa}}
+*{box-sizing:border-box}
+body{margin:0;font-family:"Trebuchet MS","Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
+header{padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+h1{font-size:1.15rem;margin:0;flex:1}
+main{display:grid;grid-template-columns:minmax(300px,380px) minmax(0,1fr);gap:16px;padding:16px;max-width:1300px;margin:auto}
+@media(max-width:800px){main{grid-template-columns:minmax(0,1fr)}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:16px;min-width:0}
+h2{font-size:.95rem;margin:0 0 10px}
+button,input{font:inherit;color:inherit}
+button{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 14px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+input{width:100%;padding:9px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.status{font-size:.85rem;color:var(--mute)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--warn);margin-right:6px}
+.dot.on{background:var(--go)}
+.pad{display:grid;grid-template-columns:repeat(3,76px);grid-template-rows:repeat(3,76px);gap:8px;justify-content:center;margin:12px 0}
+.pad button{font-size:1.5rem;padding:0}
+.pad .stop{background:var(--warn);color:#fff;border-color:var(--warn);font-size:.95rem;font-weight:bold}
+.pad .f{grid-column:2}.pad .l{grid-column:1;grid-row:2}.pad .stop{grid-column:2;grid-row:2}.pad .r{grid-column:3;grid-row:2}.pad .b{grid-column:2;grid-row:3}
+#heard{min-height:1.4em;font-weight:bold}
+/* FIX: no padding on the map container (Leaflet measures the full box) */
+#map{height:520px;width:100%;border-radius:8px;background:var(--bg);color:var(--mute);position:relative;z-index:0;display:flex;align-items:center;justify-content:center;text-align:center}
+#map.ready{display:block}
+.coords{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:10px;font-variant-numeric:tabular-nums}
+.coords b{font-size:1.15rem}
+#log{height:110px;overflow:auto;font:.78rem Consolas,monospace;color:var(--mute);background:var(--bg);padding:8px;border-radius:8px;white-space:pre-wrap}
+.row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+</style>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+</head>
+<body>
+<header>
+  <h1>Voice Car + GPS Tracker</h1>
+  <span class="status"><span class="dot" id="btDot"></span><span id="btText">Bluetooth not connected</span></span>
+  <button class="primary" id="btBtn">Connect HC-05</button>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>Voice control</h2>
+      <div class="row" style="margin:0 0 8px">
+        <button id="micBtn" class="primary">Start listening</button>
+        <select id="lang" style="padding:9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:inherit">
+          <option value="en-IN">English (India)</option><option value="en-US">English (US)</option><option value="hi-IN">Hindi</option>
+        </select>
+      </div>
+      <div class="status">Say: forward, back, left, right, stop</div>
+      <div id="heard">&nbsp;</div>
+      <div class="pad">
+        <button class="f" data-c="F" aria-label="Forward">▲</button>
+        <button class="l" data-c="L" aria-label="Left">◀</button>
+        <button class="stop" data-c="S">STOP</button>
+        <button class="r" data-c="R" aria-label="Right">▶</button>
+        <button class="b" data-c="B" aria-label="Back">▼</button>
+      </div>
+      <div class="status">Buttons work as a backup to voice. Command letters sent: F B L R S</div>
+    </section>
+    <section>
+      <h2>Log</h2>
+      <div id="log"></div>
+    </section>
+  </div>
+  <section>
+    <h2>Car location</h2>
+    <div class="coords"><div>Latitude<br><b id="lat">--</b></div><div>Longitude<br><b id="lng">--</b></div><div>Updated<br><b id="ts">--</b></div></div>
+    <div class="row" style="margin:0 0 10px"><button id="geoBtn">Use this device's GPS</button></div>
+    <div id="map">Loading map…</div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const log = m => { const l=$('log'); l.textContent += new Date().toLocaleTimeString()+'  '+m+'\n'; l.scrollTop=l.scrollHeight; };
+
+/* ---------- Bluetooth (HC-05 via Web Serial) ---------- */
+let port, writer, connected = false;
+function setBT(on, text){ connected=on; $('btDot').classList.toggle('on',on); $('btText').textContent=text; $('btBtn').textContent=on?'Disconnect':'Connect HC-05'; }
+
+async function connectBT(){
+  if(!('serial' in navigator)){ alert('Web Serial is not supported. Use Chrome or Edge on desktop, open this page via https or http://localhost.'); return; }
+  try{
+    port = await navigator.serial.requestPort();   // pick the paired HC-05 (shows as a COM / serial port)
+    await port.open({ baudRate: 9600 });
+    writer = port.writable.getWriter();
+    setBT(true,'HC-05 connected'); log('Bluetooth connected');
+    readLoop();
+  }catch(e){ log('Connect failed: '+e.message); }
+}
+async function disconnectBT(){
+  try{ await send('S'); writer.releaseLock(); await port.close(); }catch(e){}
+  setBT(false,'Bluetooth not connected'); log('Disconnected');
+}
+async function readLoop(){
+  const dec = new TextDecoder(); let buf='';
+  while(port && port.readable){
+    const reader = port.readable.getReader();
+    try{
+      while(true){
+        const {value, done} = await reader.read();
+        if(done) break;
+        buf += dec.decode(value,{stream:true});
+        let i; while((i=buf.indexOf('\n'))>=0){ handleLine(buf.slice(0,i).trim()); buf=buf.slice(i+1); }
+      }
+    }catch(e){ log('Read error: '+e.message); }
+    finally{ reader.releaseLock(); }
+    break;
+  }
+  if(connected) setBT(false,'Connection lost');
+}
+async function send(c){
+  if(!connected){ log('Not connected - command "'+c+'" not sent'); return; }
+  try{ await writer.write(new TextEncoder().encode(c)); log('Sent '+c); }catch(e){ log('Send failed: '+e.message); }
+}
+$('btBtn').onclick = () => connected ? disconnectBT() : connectBT();
+
+/* ---------- Commands ---------- */
+document.querySelectorAll('.pad button').forEach(b => b.onclick = () => send(b.dataset.c));
+const WORDS = { F:['forward','forwards','ahead','aage','आगे'], B:['back','backward','backwards','reverse','peeche','पीछे'],
+                L:['left','baen','बाएं','बायें'], R:['right','daen','दाएं','दायें'], S:['stop','halt','ruko','रुको','रुक'] };
+function matchCmd(t){ t=t.toLowerCase(); let best=null,pos=-1;
+  for(const c in WORDS) for(const w of WORDS[c]){ const p=t.lastIndexOf(w); if(p>pos){pos=p;best=c;} }
+  return best; }
+
+/* ---------- Voice ---------- */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec, listening=false, done={};
+$('micBtn').onclick = () => {
+  if(!SR){ alert('Speech recognition is not supported. Use Chrome or Edge.'); return; }
+  listening ? stopVoice() : startVoice();
+};
+function startVoice(){
+  rec = new SR(); rec.continuous=true; rec.interimResults=true; rec.lang=$('lang').value;
+  rec.onstart = () => { done={}; };
+  rec.onresult = e => {
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const t = e.results[i][0].transcript; $('heard').textContent = '“'+t.trim()+'”';
+      const c = matchCmd(t);
+      if(c && !done[i+':'+c]){ done[i+':'+c]=1; send(c); }
+    }
+  };
+  rec.onerror = e => log('Voice error: '+e.error);
+  rec.onend = () => { if(listening) try{ rec.start(); }catch(e){} };   // keep listening
+  listening=true; rec.start(); $('micBtn').textContent='Stop listening'; log('Listening');
+}
+function stopVoice(){ listening=false; rec.stop(); $('micBtn').textContent='Start listening'; log('Voice off'); }
+
+/* ---------- GPS parsing (from car) ---------- */
+function nmeaToDeg(v,h){ const d=Math.floor(v/100), m=v-d*100; let x=d+m/60; return (h==='S'||h==='W')?-x:x; }
+function handleLine(s){
+  if(!s) return;
+  let lat,lng,p=s.split(',');
+  if(p[0]==='GPS' && p.length>=3){ lat=+p[1]; lng=+p[2]; }                                  // GPS,lat,lng
+  else if(/^\$..GGA/.test(s) && p[2] && p[4]){ lat=nmeaToDeg(+p[2],p[3]); lng=nmeaToDeg(+p[4],p[5]); }
+  else if(/^\$..RMC/.test(s) && p[2]==='A'){ lat=nmeaToDeg(+p[3],p[4]); lng=nmeaToDeg(+p[5],p[6]); }
+  else { log('Car: '+s); return; }
+  if(isFinite(lat)&&isFinite(lng)&&(lat||lng)) updatePos(lat,lng);
+}
+
+/* ---------- Map (OpenStreetMap + Leaflet, no API key) ---------- */
+let map, marker, path, pending=null;
+
+const OSM_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const ESRI_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}';
+
+function initMap(){
+  if(!window.L){ log('Map failed to load - check internet connection'); $('map').textContent='Map library failed to load. Check your internet connection or ad-blocker.'; return; }
+  const el=$('map');
+  el.innerHTML=''; el.classList.add('ready');          // FIX: switch from flex placeholder to a plain block
+  const c=pending?[pending.lat,pending.lng]:[19.076,72.8777];
+  map=L.map(el,{zoomControl:true}).setView(c,pending?18:12);
+
+  // OpenStreetMap returns "403 Access blocked" when the page has no web origin (file://, content://),
+  // because no referrer is sent. Those 403 tiles still load as images, so tileerror never fires.
+  // So pick the tile source up front based on how the page was opened.
+  const isWeb = location.protocol==='http:' || location.protocol==='https:';
+  if(isWeb){
+    L.tileLayer(OSM_URL,{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
+    log('Tiles: OpenStreetMap');
+  }else{
+    L.tileLayer(ESRI_URL,{maxZoom:19,attribution:'Tiles &copy; Esri'}).addTo(map);
+    log('Opened as a local file: using Esri tiles (OpenStreetMap blocks local files). Host the page on https to use OpenStreetMap.');
+  }
+
+  // FIX: circle marker instead of the default PNG icon (which often fails to load -> invisible marker)
+  marker=L.circleMarker(c,{radius:9,color:'#fff',weight:3,fillColor:'#1d4ed8',fillOpacity:1}).addTo(map).bindTooltip('Car');
+  path=L.polyline([],{color:'#1d4ed8',weight:4}).addTo(map);
+
+  // FIX: recalc size after layout settles and on window resize
+  const fix=()=>map.invalidateSize();
+  setTimeout(fix,100); setTimeout(fix,500);
+  window.addEventListener('load',fix);
+  window.addEventListener('resize',fix);
+  if(window.ResizeObserver) new ResizeObserver(fix).observe(el);
+
+  log('Map loaded');
+  if(pending) updatePos(pending.lat,pending.lng);
+}
+function updatePos(lat,lng){
+  $('lat').textContent=lat.toFixed(6); $('lng').textContent=lng.toFixed(6); $('ts').textContent=new Date().toLocaleTimeString();
+  pending={lat,lng};
+  if(!map) return;
+  marker.setLatLng([lat,lng]); path.addLatLng([lat,lng]);
+  map.setView([lat,lng],Math.max(map.getZoom(),17));
+}
+initMap();
+
+/* Fallback: this device's own GPS */
+let watchId=null;
+$('geoBtn').onclick = () => {
+  if(watchId!==null){ navigator.geolocation.clearWatch(watchId); watchId=null; $('geoBtn').textContent="Use this device's GPS"; return; }
+  if(!navigator.geolocation){ alert('Geolocation not supported'); return; }
+  watchId=navigator.geolocation.watchPosition(p=>updatePos(p.coords.latitude,p.coords.longitude),e=>log('GPS error: '+e.message),{enableHighAccuracy:true});
+  $('geoBtn').textContent='Stop device GPS'; log('Using device GPS');
+};
+</script>
+</body>
+</html>
