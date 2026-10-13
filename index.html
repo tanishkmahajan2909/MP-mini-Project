@@ -219,10 +219,10 @@ initMap();
 /* Fallback: this device's own GPS */
 let watchId=null;
 $('geoBtn').onclick = () => {
-  if(watchId!==null){ navigator.geolocation.clearWatch(watchId); watchId=null; $('geoBtn').textContent="Use this device's GPS"; return; }
+  if(watchId!==null){ navigator.geolocation.clearWatch(watchId); watchId=null; $('geoBtn').textContent="Use Cars's GPS"; return; }
   if(!navigator.geolocation){ alert('Geolocation not supported'); return; }
   watchId=navigator.geolocation.watchPosition(p=>updatePos(p.coords.latitude,p.coords.longitude),e=>log('GPS error: '+e.message),{enableHighAccuracy:true});
-  $('geoBtn').textContent='Stop device GPS'; log('Using device GPS');
+  $('geoBtn').textContent='Stop Car GPS'; log('Using Car GPS');
 };
 </script>
 </body>
